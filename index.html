@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📺 Türk IPTV - VOD & Canlı TV</title>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest">
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #0a0a0a;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            color: #fff;
+            overflow: hidden;
+        }
+
+        /* ---- ÜST KONTROL ALANI ---- */
+        #controls {
+            background: #1a1a1a;
+            padding: 10px 14px;
+            border-bottom: 1px solid #333;
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        /* Sekmeler */
+        #tabs {
+            display: flex;
+            gap: 6px;
+        }
+        .tab-btn {
+            flex: 1;
+            padding: 10px 16px;
+            background: #2a2a2a;
+            border: 1px solid #444;
+            color: #aaa;
+            font-size: 15px;
+            font-weight: 600;
+            border-radius: 8px 8px 0 0;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-align: center;
+        }
+        .tab-btn.active {
+            background: #1a1a1a;
+            color: #fff;
+            border-bottom: 2px solid #e50914;
+            box-shadow: 0 -2px 8px rgba(229, 9, 20, 0.3);
+        }
+        .tab-btn:hover:not(.active) {
+            background: #333;
+            color: #ddd;
+        }
+
+        /* Select alanları */
+        #selectRow {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: center;
+        }
+        #selectRow select {
+            background: #222;
+            color: #fff;
+            border: 1px solid #444;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 14px;
+            flex: 1;
+            min-width: 130px;
+            outline: none;
+            transition: border 0.2s;
+        }
+        #selectRow select:focus {
+            border-color: #e50914;
+        }
+        #selectRow label {
+            color: #aaa;
+            font-weight: 600;
+            font-size: 13px;
+            white-space: nowrap;
+        }
+
+        #status {
+            color: #aaa;
+            font-size: 12px;
+            text-align: right;
+            padding: 2px 4px;
+            min-height: 18px;
+        }
+
+        /* ---- VİDEO ALANI ---- */
+        #video-container {
+            flex: 1;
+            position: relative;
+            background: #000;
+        }
+        video {
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+            object-fit: contain;
+        }
+        .loading {
+            color: #fff;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 16px;
+            background: rgba(0, 0, 0, 0.85);
+            padding: 12px 24px;
+            border-radius: 10px;
+            border: 1px solid #444;
+            z-index: 10;
+            pointer-events: none;
+        }
+
+        /* Mobil uyum */
+        @media (max-width: 480px) {
+            #selectRow {
+                flex-direction: column;
+                gap: 6px;
+            }
+            #selectRow select {
+                width: 100%;
+            }
+            .tab-btn {
+                font-size: 13px;
+                padding: 8px 10px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="controls">
+        <!-- Sekmeler -->
+        <div id="tabs">
+            <button id="tabVOD" class="tab-btn active">🎬 Film & Dizi (VOD)</button>
+            <button id="tabLIVE" class="tab-btn">📺 Canlı TV</button>
+        </div>
+
+        <!-- Dinamik seçim alanı -->
+        <div id="selectRow"></div>
+
+        <!-- Durum mesajı -->
+        <div id="status">🔄 Başlatılıyor...</div>
+    </div>
+
+    <!-- Video oynatıcı -->
+    <div id="video-container">
+        <video id="video" controls playsinline></video>
+        <div id="loadingIndicator" class="loading" style="display:none;">⏳ Akış bağlanıyor...</div>
+    </div>
+
+    <script>
+        (function() {
+            // --- M3U KAYNAK URL'LERİ (İsteğe bağlı değiştirilebilir) ---
+            const VOD_URL = 'https://raw.githubusercontent.com/cyberpirate92/IPTV/main/TR_VOD.m3u';
+            const LIVE_URL = 'https://raw.githubusercontent.com/iptv-turk-tr/iptv/main/list.m3u';
+
+            // --- DOM Elemanları ---
+            const video = document.getElementById('video');
+            const selectRow = document.getElementById('selectRow');
+            const statusEl = document.getElementById('status');
+            const loadingEl = document.getElementById('loadingIndicator');
+            const tabVOD = document.getElementById('tabVOD');
+            const tabLIVE = document.getElementById('tabLIVE');
+
+            // --- State ---
+            let hls = null;
+            let currentMode = 'vod'; // 'vod' veya 'live'
+            let vodData = {}; // { kategori: [{title, url, logo}] }
+            let liveData = []; // [{title, url}]
+            let vodLoaded = false;
+            let liveLoaded = false;
+
+            // --- ORTAK: Akış oynatma ---
+            function playStream(url) {
+                if (!url) return;
+                loadingEl.style.display = 'block';
+                statusEl.innerText = '⏳ Bağlanıyor...';
+
+                // Önceki HLS instance'ı temizle
+                if (hls) {
+                    hls.destroy();
+                    hls = null;
+                }
+                video.pause();
+                video.removeAttribute('src');
+                video.load();
+
+                // Native HLS desteği (iOS/Safari)
+                if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                    video.src = url;
+                    video.play().catch(() => {});
+                    video.onloadeddata = () => {
+                        loadingEl.style.display = 'none';
+                        statusEl.innerText = '▶️ Oynatılıyor (Native HLS)';
+                    };
+                    video.onerror = () => {
+                        loadingEl.style.display = 'none';
+                        statusEl.innerText = '⚠️ Oynatılamadı (URL geçersiz olabilir)';
+                    };
+                    return;
+                }
+
+                // hls.js ile oynatma
+                if (Hls.isSupported()) {
+                    hls = new Hls();
+                    hls.loadSource(url);
+                    hls.attachMedia(video);
+                    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                        video.play().catch(() => {});
+                        loadingEl.style.display = 'none';
+                        statusEl.innerText = '▶️ Oynatılıyor (hls.js)';
+                    });
+                    hls.on(Hls.Events.ERROR, (event, data) => {
+                        if (data.fatal) {
+                            loadingEl.style.display = 'none';
+                            statusEl.innerText = '❌ Akış hatası (içerik çevrimdışı olabilir)';
+                        }
+                    });
+                } else {
+                    loadingEl.style.display = 'none';
+                    statusEl.innerText = '❌ Tarayıcı HLS desteklemiyor';
+                    alert('Tarayıcınız HLS akışlarını desteklemiyor.');
+                }
+            }
+
+            // --- VOD: M3U yükleme ve parse ---
+            async function loadVOD() {
+                if (vodLoaded) return;
+                statusEl.innerText = '📡 VOD listesi alınıyor...';
+                try {
+                    const resp = await fetch(VOD_URL);
+                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                    const text = await resp.text();
+                    const lines = text.split('\n');
+                    let currentItem = null;
+                    const items = {};
+                    let total = 0;
+
+                    for (let line of lines) {
+                        line = line.trim();
+                        if (line.startsWith('#EXTINF:')) {
+                            const groupMatch = line.match(/group-title="([^"]*)"/);
+                            const titleMatch = line.match(/,([^,]+)$/);
+                            const logoMatch = line.match(/tvg-logo="([^"]*)"/);
+                            const title = titleMatch ? titleMatch[1].trim() : 'Bilinmeyen';
+                            const group = groupMatch ? groupMatch[1].trim() : 'Diğer';
+                            const logo = logoMatch ? logoMatch[1].trim() : '';
+                            currentItem = { title, group, logo, url: '' };
+                        } else if (line && !line.startsWith('#') && currentItem) {
+                            if (line.startsWith('http://') || line.startsWith('https://')) {
+                                currentItem.url = line;
+                                if (!items[currentItem.group]) items[currentItem.group] = [];
+                                items[currentItem.group].push({
+                                    title: currentItem.title,
+                                    url: currentItem.url,
+                                    logo: currentItem.logo
+                                });
+                                total++;
+                                currentItem = null;
+                            } else {
+                                currentItem = null;
+                            }
+                        }
+                    }
+
+                    const sortedGroups = Object.keys(items).sort((a, b) => a.localeCompare(b));
+                    if (sortedGroups.length === 0) throw new Error('Hiç VOD içeriği bulunamadı');
+
+                    vodData = items;
+                    vodLoaded = true;
+                    statusEl.innerText = `✅ ${total} VOD içeriği (${sortedGroups.length} kategori)`;
+
+                    // Eğer VOD sekmesi aktifse kontrolleri render et
+                    if (currentMode === 'vod') renderVODControls();
+                } catch (err) {
+                    statusEl.innerText = '❌ VOD yüklenemedi: ' + err.message;
+                }
+            }
+
+            // --- VOD: Kategori ve içerik select'lerini oluştur ---
+            function renderVODControls() {
+                const sortedGroups = Object.keys(vodData).sort((a, b) => a.localeCompare(b));
+                selectRow.innerHTML = `
+                    <label for="vodCategory">🗂️ Kategori:</label>
+                    <select id="vodCategory">
+                        <option value="">Tüm Kategoriler</option>
+                        ${sortedGroups.map(g => `<option value="${g}">${g} (${vodData[g].length})</option>`).join('')}
+                    </select>
+                    <label for="vodItem">🎞️ İçerik:</label>
+                    <select id="vodItem">
+                        <option value="">--- Kategori seçin ---</option>
+                    </select>
+                `;
+
+                const catSelect = document.getElementById('vodCategory');
+                const itemSelect = document.getElementById('vodItem');
+
+                // Kategori değişince içerik listesini doldur
+                catSelect.addEventListener('change', function() {
+                    const cat = this.value;
+                    itemSelect.innerHTML = '<option value="">--- İçerik seçin ---</option>';
+                    let items = [];
+                    if (cat === '') {
+                        for (const k in vodData) items = items.concat(vodData[k]);
+                    } else {
+                        items = vodData[cat] || [];
+                    }
+                    items.sort((a, b) => a.title.localeCompare(b.title));
+                    const limited = items.slice(0, 500);
+                    for (const item of limited) {
+                        const opt = document.createElement('option');
+                        opt.value = item.url;
+                        opt.textContent = item.title;
+                        itemSelect.appendChild(opt);
+                    }
+                    if (items.length > 500) {
+                        const opt = document.createElement('option');
+                        opt.disabled = true;
+                        opt.textContent = `... ve ${items.length - 500} içerik daha`;
+                        itemSelect.appendChild(opt);
+                    }
+                    // İlk içeriği otomatik oynat
+                    if (itemSelect.options.length > 1) {
+                        itemSelect.value = itemSelect.options[1].value;
+                        playStream(itemSelect.options[1].value);
+                    }
+                });
+
+                // İçerik seçilince oynat
+                itemSelect.addEventListener('change', function() {
+                    if (this.value) playStream(this.value);
+                });
+
+                // Varsayılan olarak ilk kategoriyi seç ve tetikle
+                if (sortedGroups.length > 0) {
+                    catSelect.value = sortedGroups[0];
+                    catSelect.dispatchEvent(new Event('change'));
+                }
+            }
+
+            // --- CANLI TV: M3U yükleme ve parse ---
+            async function loadLive() {
+                if (liveLoaded) return;
+                statusEl.innerText = '📡 Canlı TV listesi alınıyor...';
+                try {
+                    const resp = await fetch(LIVE_URL);
+                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                    const text = await resp.text();
+                    const lines = text.split('\n');
+                    const channels = [];
+                    let title = '';
+
+                    for (let line of lines) {
+                        line = line.trim();
+                        if (line.startsWith('#EXTINF:')) {
+                            const match = line.match(/,([^,]+)$/);
+                            if (match) title = match[1].trim();
+                        } else if (line && !line.startsWith('#') && title) {
+                            if (line.startsWith('http://') || line.startsWith('https://')) {
+                                channels.push({ title, url: line });
+                            }
+                            title = '';
+                        }
+                    }
+
+                    channels.sort((a, b) => a.title.localeCompare(b.title));
+                    liveData = channels.slice(0, 300); // İlk 300 kanal
+                    liveLoaded = true;
+                    statusEl.innerText = `✅ ${liveData.length} canlı kanal yüklendi`;
+
+                    if (currentMode === 'live') renderLiveControls();
+                } catch (err) {
+                    statusEl.innerText = '❌ Canlı TV yüklenemedi: ' + err.message;
+                }
+            }
+
+            // --- CANLI TV: Kanal select'ini oluştur ---
+            function renderLiveControls() {
+                selectRow.innerHTML = `
+                    <label for="liveChannel">📡 Kanal:</label>
+                    <select id="liveChannel">
+                        <option value="">--- Kanal seçin ---</option>
+                        ${liveData.map(ch => `<option value="${ch.url}">${ch.title}</option>`).join('')}
+                    </select>
+                `;
+
+                const chSelect = document.getElementById('liveChannel');
+                chSelect.addEventListener('change', function() {
+                    if (this.value) playStream(this.value);
+                });
+
+                // İlk kanalı otomatik oynat
+                if (liveData.length > 0) {
+                    chSelect.value = liveData[0].url;
+                    playStream(liveData[0].url);
+                }
+            }
+
+            // --- Sekme geçişleri ---
+            function switchTab(mode) {
+                currentMode = mode;
+                // Sekme stillerini güncelle
+                tabVOD.classList.toggle('active', mode === 'vod');
+                tabLIVE.classList.toggle('active', mode === 'live');
+
+                // Video ve HLS'i durdur/sıfırla
+                if (hls) {
+                    hls.destroy();
+                    hls = null;
+                }
+                video.pause();
+                video.removeAttribute('src');
+                video.load();
+                loadingEl.style.display = 'none';
+
+                if (mode === 'vod') {
+                    if (vodLoaded) {
+                        renderVODControls();
+                    } else {
+                        selectRow.innerHTML =
+                            '<span style="color:#aaa;">⏳ VOD listesi yükleniyor, lütfen bekleyin...</span>';
+                        loadVOD().then(() => {
+                            if (currentMode === 'vod') renderVODControls();
+                        });
+                    }
+                } else if (mode === 'live') {
+                    if (liveLoaded) {
+                        renderLiveControls();
+                    } else {
+                        selectRow.innerHTML =
+                            '<span style="color:#aaa;">⏳ Canlı TV listesi yükleniyor, lütfen bekleyin...</span>';
+                        loadLive().then(() => {
+                            if (currentMode === 'live') renderLiveControls();
+                        });
+                    }
+                }
+            }
+
+            // --- Event Listeners ---
+            tabVOD.addEventListener('click', () => switchTab('vod'));
+            tabLIVE.addEventListener('click', () => switchTab('live'));
+
+            // Video genel hata
+            video.addEventListener('error', () => {
+                loadingEl.style.display = 'none';
+                statusEl.innerText = '⚠️ Oynatılamıyor (URL geçersiz veya akış kesildi)';
+            });
+
+            // --- BAŞLANGIÇ: Varsayılan VOD sekmesini yükle ---
+            window.addEventListener('load', () => {
+                switchTab('vod');
+            });
+        })();
+    </script>
+</body>
+</html>
